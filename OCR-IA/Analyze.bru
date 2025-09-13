@@ -1,0 +1,19 @@
+meta {
+  name: Analyze
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{url}}/api/documents/analyze
+  body: multipartForm
+  auth: inherit
+}
+
+body:multipart-form {
+  file: @file(/media/DATA/workspace/DEV/CPAGE/ia-ocr/src/test/resources/ocr/facture.png)
+}
+
+settings {
+  encodeUrl: true
+}

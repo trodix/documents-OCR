@@ -1,0 +1,9 @@
+{
+  "version": "1",
+  "name": "OCR-IA",
+  "type": "collection",
+  "ignore": [
+    "node_modules",
+    ".git"
+  ]
+}

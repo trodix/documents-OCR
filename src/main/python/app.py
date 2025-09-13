@@ -8,6 +8,11 @@ import json
 from typing import Dict, List, Optional, Any
 from pydantic import BaseModel
 import logging
+import PyPDF2
+import io
+import fitz  # pymupdf pour une meilleure extraction
+from PIL import Image
+import tempfile
 
 # Configuration du logging
 logging.basicConfig(level=logging.INFO)
@@ -72,11 +77,84 @@ DOCUMENT_TYPES = {
     }
 }
 
-def detect_document_type(text_content: str) -> Optional[str]:
+def extract_text_from_pdf(file_bytes: bytes) -> str:
     """
-    Détecte le type de document basé sur le contenu textuel
-    Retourne None si le type ne peut pas être déterminé
+    Extrait le texte d'un PDF en utilisant PyMuPDF (fitz)
     """
+    try:
+        # Méthode 1: PyMuPDF (plus robuste)
+        pdf_document = fitz.open(stream=file_bytes, filetype="pdf")
+        text_content = ""
+
+        for page_num in range(len(pdf_document)):
+            page = pdf_document.load_page(page_num)
+            text_content += page.get_text()
+            text_content += "\n\n"  # Séparateur entre pages
+
+        pdf_document.close()
+
+        if text_content.strip():
+            return text_content.strip()
+
+    except Exception as e:
+        logger.warning(f"Échec extraction PyMuPDF: {e}")
+
+    try:
+        # Méthode 2: PyPDF2 (fallback)
+        pdf_reader = PyPDF2.PdfReader(io.BytesIO(file_bytes))
+        text_content = ""
+
+        for page in pdf_reader.pages:
+            text_content += page.extract_text()
+            text_content += "\n\n"
+
+        if text_content.strip():
+            return text_content.strip()
+
+    except Exception as e:
+        logger.warning(f"Échec extraction PyPDF2: {e}")
+
+    return ""
+
+def pdf_to_images(file_bytes: bytes, max_pages: int = 5) -> List[str]:
+    """
+    Convertit les pages d'un PDF en images base64
+    Limite aux premières pages pour éviter les timeouts
+    """
+    images_b64 = []
+
+    try:
+        pdf_document = fitz.open(stream=file_bytes, filetype="pdf")
+
+        # Limiter le nombre de pages pour éviter les timeouts
+        num_pages = min(len(pdf_document), max_pages)
+
+        for page_num in range(num_pages):
+            page = pdf_document.load_page(page_num)
+
+            # Convertir en image
+            mat = fitz.Matrix(2.0, 2.0)  # Facteur d'échelle pour meilleure qualité
+            pix = page.get_pixmap(matrix=mat)
+            img_data = pix.tobytes("png")
+
+            # Encoder en base64
+            img_b64 = base64.b64encode(img_data).decode("utf-8")
+            images_b64.append(img_b64)
+
+        pdf_document.close()
+
+    except Exception as e:
+        logger.error(f"Erreur conversion PDF en images: {e}")
+
+    return images_b64
+
+def detect_document_type_from_text(text_content: str) -> Optional[str]:
+    """
+    Détecte le type de document basé sur le contenu textuel extrait
+    """
+    if not text_content or len(text_content.strip()) < 10:
+        return None
+
     text_lower = text_content.lower()
 
     # Score pour chaque type de document
@@ -87,22 +165,78 @@ def detect_document_type(text_content: str) -> Optional[str]:
         keywords = config["keywords"]
 
         for keyword in keywords:
+            # Recherche plus flexible pour le texte extrait
             if keyword.lower() in text_lower:
+                score += 2  # Score plus élevé pour correspondance exacte
+            # Recherche partielle
+            elif any(word in text_lower for word in keyword.lower().split()):
                 score += 1
 
         # Score relatif au nombre de mots-clés
         if keywords:
             type_scores[doc_type] = score / len(keywords)
 
-    # Retourner le type avec le meilleur score si > 0.2 (seuil de confiance)
+    # Retourner le type avec le meilleur score si > 0.3 (seuil un peu plus élevé pour le texte)
     if type_scores:
         best_type = max(type_scores.items(), key=lambda x: x[1])
-        if best_type[1] > 0.2:
-            logger.info(f"Type détecté: {best_type[0]} (score: {best_type[1]:.2f})")
+        if best_type[1] > 0.3:
+            logger.info(f"Type détecté depuis texte: {best_type[0]} (score: {best_type[1]:.2f})")
             return best_type[0]
 
-    logger.warning("Impossible de déterminer le type de document")
+    logger.warning("Impossible de déterminer le type depuis le texte PDF")
     return None
+
+async def detect_document_type_from_image(image_b64: str, content_type: str = "image/png") -> Optional[str]:
+    """Détecte le type de document depuis une image"""
+    try:
+        detection_messages = [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": """Analyse cette image et détermine de quel type de document il s'agit. 
+                        
+                        Types possibles: facture, bon_commande, bon_livraison, carte_identite_francaise, marche, passeport, permis_conduire, ou autre.
+                        
+                        Réponds UNIQUEMENT avec le type de document en un seul mot, ou "autre" si tu ne peux pas déterminer.
+                        
+                        Exemples de réponses valides: facture, bon_commande, carte_identite_francaise, autre"""
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:{content_type};base64,{image_b64}"
+                        }
+                    }
+                ]
+            }
+        ]
+
+        detection_response = client.chat.complete(
+            model="pixtral-12b-2409",
+            messages=detection_messages,
+            max_tokens=50,
+            temperature=0.1
+        )
+
+        detected_type_raw = detection_response.choices[0].message.content.strip().lower()
+        logger.info(f"Type détecté par l'IA: {detected_type_raw}")
+
+        # Validation du type détecté
+        if detected_type_raw in DOCUMENT_TYPES.keys():
+            return detected_type_raw
+        elif detected_type_raw != "autre":
+            # Essayer de mapper avec les types connus
+            for known_type in DOCUMENT_TYPES.keys():
+                if known_type in detected_type_raw or detected_type_raw in known_type:
+                    return known_type
+
+        return None
+
+    except Exception as e:
+        logger.error(f"Erreur détection type depuis image: {e}")
+        return None
 
 def create_document_analysis_prompt(detected_type: Optional[str], fields_to_extract: List[str]) -> str:
     """
@@ -141,6 +275,55 @@ Exemple de format de réponse attendu:
 """
 
     # Ajouter un exemple pour chaque champ
+    for i, field in enumerate(fields_to_extract):
+        base_prompt += f'  "{field}": null'
+        if i < len(fields_to_extract) - 1:
+            base_prompt += ","
+        base_prompt += "\n"
+
+    base_prompt += "}"
+
+    return base_prompt
+
+def create_document_analysis_prompt_for_text(detected_type: Optional[str], fields_to_extract: List[str], text_content: str) -> str:
+    """
+    Crée un prompt pour analyser le texte extrait d'un PDF
+    """
+    base_prompt = f"""Tu es un expert en analyse de documents. Analyse le texte suivant extrait d'un document et extrait UNIQUEMENT les informations demandées au format JSON.
+
+TEXTE DU DOCUMENT:
+{text_content[:3000]}  # Limiter la taille pour éviter les timeouts
+
+IMPORTANT:
+- Renvoie UNIQUEMENT un JSON valide, rien d'autre
+- Si une information n'est pas trouvée dans le texte, utilise null
+- Ne devine pas les informations manquantes
+- Pour les dates, utilise le format YYYY-MM-DD si possible
+- Pour les montants, utilise des nombres sans symbole monétaire
+- Sois précis et factuel
+
+"""
+
+    if detected_type:
+        type_info = {
+            "facture": "Ce document semble être une FACTURE. Concentre-toi sur les informations commerciales et financières.",
+            "bon_commande": "Ce document semble être un BON DE COMMANDE. Concentre-toi sur les articles commandés et quantités.",
+            "bon_livraison": "Ce document semble être un BON DE LIVRAISON. Concentre-toi sur les informations de transport et livraison.",
+            "carte_identite_francaise": "Ce document semble être une CARTE D'IDENTITÉ FRANÇAISE. Concentre-toi sur les informations d'état civil.",
+            "marche": "Ce document semble être un MARCHÉ/CONTRAT. Concentre-toi sur les parties contractantes et conditions.",
+            "passeport": "Ce document semble être un PASSEPORT. Concentre-toi sur les informations d'identité et de voyage.",
+            "permis_conduire": "Ce document semble être un PERMIS DE CONDUIRE. Concentre-toi sur les informations de conduite."
+        }
+        base_prompt += type_info.get(detected_type, f"Ce document semble être de type: {detected_type}.")
+        base_prompt += "\n\n"
+
+    base_prompt += f"""Champs à extraire obligatoirement:
+{json.dumps(fields_to_extract, ensure_ascii=False, indent=2)}
+
+Exemple de format de réponse attendu:
+{{
+"""
+
     for i, field in enumerate(fields_to_extract):
         base_prompt += f'  "{field}": null'
         if i < len(fields_to_extract) - 1:
@@ -214,6 +397,7 @@ async def analyze_document_generic(
 ):
     """
     Analyse générique d'un document avec détection automatique du type
+    Support des images (PNG, JPG, etc.) et des PDF
     """
     try:
         # Parse des champs demandés
@@ -225,99 +409,156 @@ async def analyze_document_generic(
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Erreur dans les champs: {str(e)}")
 
-        # Validation du fichier
-        if not file.content_type or not file.content_type.startswith("image/"):
-            raise HTTPException(status_code=400, detail="Seules les images sont supportées actuellement")
-
-        # Lecture et encodage du fichier
+        # Lecture du fichier
         file_bytes = await file.read()
-        b64 = base64.b64encode(file_bytes).decode("utf-8")
 
-        # ÉTAPE 1: Détection du type de document
-        # Premier appel pour identifier le type
-        detection_messages = [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": """Analyse cette image et détermine de quel type de document il s'agit. 
-                        
-                        Types possibles: facture, bon_commande, bon_livraison, carte_identite_francaise, marche, passeport, permis_conduire, ou autre.
-                        
-                        Réponds UNIQUEMENT avec le type de document en un seul mot, ou "autre" si tu ne peux pas déterminer.
-                        
-                        Exemples de réponses valides: facture, bon_commande, carte_identite_francaise, autre"""
-                    },
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:{file.content_type};base64,{b64}"
-                        }
-                    }
-                ]
-            }
-        ]
+        # Validation des formats supportés
+        is_pdf = file.content_type == "application/pdf" or (file.filename and file.filename.lower().endswith('.pdf'))
+        is_image = file.content_type and file.content_type.startswith("image/")
 
-        # Appel pour détecter le type
-        detection_response = client.chat.complete(
-            model="pixtral-12b-2409",
-            messages=detection_messages,
-            max_tokens=50,
-            temperature=0.1
-        )
+        if not is_pdf and not is_image:
+            raise HTTPException(
+                status_code=400,
+                detail="Formats supportés: images (PNG, JPG, JPEG, etc.) et PDF uniquement"
+            )
 
-        detected_type_raw = detection_response.choices[0].message.content.strip().lower()
-        logger.info(f"Type détecté par l'IA: {detected_type_raw}")
-
-        # Validation du type détecté
+        # Variables pour stocker les résultats
         detected_type = None
-        if detected_type_raw in DOCUMENT_TYPES.keys():
-            detected_type = detected_type_raw
-        elif detected_type_raw != "autre":
-            # Si le type n'est pas reconnu, on essaie de le mapper
-            for known_type in DOCUMENT_TYPES.keys():
-                if known_type in detected_type_raw or detected_type_raw in known_type:
-                    detected_type = known_type
-                    break
+        raw_response = ""
+        extracted_data = {}
 
-        logger.info(f"Type final retenu: {detected_type}")
+        if is_pdf:
+            logger.info("Traitement d'un fichier PDF")
 
-        # ÉTAPE 2: Extraction des champs
-        # Création du prompt personnalisé
-        extraction_prompt = create_document_analysis_prompt(detected_type, fields_request.fieldsToExtract)
+            # MÉTHODE 1: Extraction de texte pour analyse rapide
+            pdf_text = extract_text_from_pdf(file_bytes)
 
-        extraction_messages = [
-            {
-                "role": "user",
-                "content": [
+            if pdf_text:
+                logger.info(f"Texte extrait du PDF ({len(pdf_text)} caractères)")
+
+                # Détection du type basée sur le texte
+                detected_type = detect_document_type_from_text(pdf_text)
+
+                # Si on a du texte, on peut essayer l'analyse textuelle avec l'IA
+                text_analysis_prompt = create_document_analysis_prompt_for_text(
+                    detected_type, fields_request.fieldsToExtract, pdf_text
+                )
+
+                # Appel à l'IA pour analyser le texte extrait
+                text_messages = [
                     {
-                        "type": "text",
-                        "text": extraction_prompt
-                    },
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:{file.content_type};base64,{b64}"
-                        }
+                        "role": "user",
+                        "content": text_analysis_prompt
                     }
                 ]
-            }
-        ]
 
-        # Appel pour extraire les données
-        extraction_response = client.chat.complete(
-            model="pixtral-12b-2409",
-            messages=extraction_messages,
-            max_tokens=1000,
-            temperature=0.1
-        )
+                try:
+                    text_response = client.chat.complete(
+                        model="mistral-large-latest",  # Meilleur pour l'analyse textuelle
+                        messages=text_messages,
+                        max_tokens=1000,
+                        temperature=0.1
+                    )
 
-        raw_response = extraction_response.choices[0].message.content
-        logger.info(f"Réponse d'extraction brute: {raw_response}")
+                    raw_response = text_response.choices[0].message.content
+                    extracted_data = extract_json_from_response(raw_response)
 
-        # Extraction du JSON
-        extracted_data = extract_json_from_response(raw_response)
+                    logger.info("Analyse textuelle du PDF réussie")
+
+                except Exception as e:
+                    logger.warning(f"Échec analyse textuelle: {e}")
+                    extracted_data = {}
+
+            # MÉTHODE 2: Si l'analyse textuelle a échoué, convertir en images
+            if not extracted_data or not detected_type:
+                logger.info("Conversion du PDF en images pour analyse visuelle")
+
+                pdf_images = pdf_to_images(file_bytes, max_pages=3)
+
+                if pdf_images:
+                    # Utiliser la première page pour la détection du type
+                    first_page_b64 = pdf_images[0]
+
+                    # Détection du type sur la première page
+                    if not detected_type:
+                        detected_type = await detect_document_type_from_image(first_page_b64)
+
+                    # Analyse de la première page (ou de toutes si nécessaire)
+                    extraction_prompt = create_document_analysis_prompt(detected_type, fields_request.fieldsToExtract)
+
+                    extraction_messages = [
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": extraction_prompt
+                                },
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:image/png;base64,{first_page_b64}"
+                                    }
+                                }
+                            ]
+                        }
+                    ]
+
+                    try:
+                        extraction_response = client.chat.complete(
+                            model="pixtral-12b-2409",
+                            messages=extraction_messages,
+                            max_tokens=1000,
+                            temperature=0.1
+                        )
+
+                        raw_response = extraction_response.choices[0].message.content
+                        extracted_data = extract_json_from_response(raw_response)
+
+                        logger.info("Analyse visuelle du PDF réussie")
+
+                    except Exception as e:
+                        logger.error(f"Échec analyse visuelle PDF: {e}")
+                        extracted_data = {}
+
+        else:
+            # Traitement des images (méthode originale)
+            logger.info("Traitement d'un fichier image")
+            b64 = base64.b64encode(file_bytes).decode("utf-8")
+
+            # Détection du type
+            detected_type = await detect_document_type_from_image(b64, file.content_type)
+
+            # Extraction des champs
+            extraction_prompt = create_document_analysis_prompt(detected_type, fields_request.fieldsToExtract)
+
+            extraction_messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": extraction_prompt
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:{file.content_type};base64,{b64}"
+                            }
+                        }
+                    ]
+                }
+            ]
+
+            extraction_response = client.chat.complete(
+                model="pixtral-12b-2409",
+                messages=extraction_messages,
+                max_tokens=1000,
+                temperature=0.1
+            )
+
+            raw_response = extraction_response.choices[0].message.content
+            extracted_data = extract_json_from_response(raw_response)
 
         # Si échec d'extraction, créer structure par défaut
         if not extracted_data:
@@ -333,7 +574,7 @@ async def analyze_document_generic(
         confidence = calculate_confidence(extracted_data, fields_request.fieldsToExtract)
 
         return DocumentAnalysisResponse(
-            documentType=detected_type,  # null si non déterminé
+            documentType=detected_type,
             extractedFields=extracted_data,
             rawResponse=raw_response,
             confidence=confidence,
@@ -356,7 +597,23 @@ async def analyze_document_generic(
 @app.get("/health")
 async def health_check():
     """Point de santé de l'API"""
-    return {"status": "healthy", "service": "Generic Document Analysis Service"}
+    return {"status": "healthy", "service": "Generic Document Analysis Service", "supported_formats": ["images", "pdf"]}
+
+@app.get("/supported-formats")
+async def get_supported_formats():
+    """Retourne les formats de fichiers supportés"""
+    return {
+        "image_formats": ["image/png", "image/jpeg", "image/jpg", "image/gif", "image/bmp", "image/webp"],
+        "document_formats": ["application/pdf"],
+        "processing_methods": {
+            "images": "Vision AI directe",
+            "pdf": "Extraction de texte + conversion en images si nécessaire"
+        },
+        "limitations": {
+            "pdf_max_pages": 5,
+            "pdf_processing": "Les PDF sont traités par extraction de texte en priorité, puis conversion en images si nécessaire"
+        }
+    }
 
 @app.get("/supported-types")
 async def get_supported_document_types():
@@ -380,44 +637,83 @@ async def test_document_detection(file: UploadFile = File(...)):
     """Endpoint de test pour la détection de type seulement"""
     try:
         file_bytes = await file.read()
-        b64 = base64.b64encode(file_bytes).decode("utf-8")
 
-        detection_messages = [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": "Identifie le type de ce document en un mot: facture, bon_commande, bon_livraison, carte_identite_francaise, marche, passeport, permis_conduire, ou autre."
-                    },
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:{file.content_type};base64,{b64}"
-                        }
-                    }
-                ]
+        is_pdf = file.content_type == "application/pdf" or (file.filename and file.filename.lower().endswith('.pdf'))
+
+        if is_pdf:
+            # Test avec PDF
+            pdf_text = extract_text_from_pdf(file_bytes)
+            detected_from_text = detect_document_type_from_text(pdf_text) if pdf_text else None
+
+            # Test avec conversion en image
+            pdf_images = pdf_to_images(file_bytes, max_pages=1)
+            detected_from_image = None
+            if pdf_images:
+                detected_from_image = await detect_document_type_from_image(pdf_images[0])
+
+            return {
+                "file_type": "pdf",
+                "text_extraction": {"success": bool(pdf_text), "length": len(pdf_text) if pdf_text else 0},
+                "detected_from_text": detected_from_text,
+                "detected_from_image": detected_from_image,
+                "final_detected": detected_from_text or detected_from_image
             }
-        ]
+        else:
+            # Test avec image
+            b64 = base64.b64encode(file_bytes).decode("utf-8")
+            detected = await detect_document_type_from_image(b64, file.content_type)
 
-        response = client.chat.complete(
-            model="pixtral-12b-2409",
-            messages=detection_messages,
-            max_tokens=50,
-            temperature=0.1
-        )
-
-        detected = response.choices[0].message.content.strip().lower()
-
-        return {
-            "detected_type": detected if detected in DOCUMENT_TYPES else None,
-            "raw_response": detected,
-            "confidence": "high" if detected in DOCUMENT_TYPES else "low"
-        }
+            return {
+                "file_type": "image",
+                "detected_type": detected,
+                "confidence": "high" if detected in DOCUMENT_TYPES else "low"
+            }
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/test-pdf")
+async def test_pdf_processing(file: UploadFile = File(...)):
+    """Endpoint de test pour vérifier le traitement PDF"""
+    try:
+        if not (file.content_type == "application/pdf" or (file.filename and file.filename.lower().endswith('.pdf'))):
+            raise HTTPException(status_code=400, detail="Fichier PDF requis")
+
+        file_bytes = await file.read()
+
+        # Test extraction de texte
+        pdf_text = extract_text_from_pdf(file_bytes)
+        text_length = len(pdf_text) if pdf_text else 0
+
+        # Test conversion en images
+        pdf_images = pdf_to_images(file_bytes, max_pages=2)
+
+        # Test détection de type depuis le texte
+        detected_type_text = detect_document_type_from_text(pdf_text) if pdf_text else None
+
+        return {
+            "filename": file.filename,
+            "content_type": file.content_type,
+            "file_size": len(file_bytes),
+            "text_extraction": {
+                "success": bool(pdf_text),
+                "text_length": text_length,
+                "preview": pdf_text[:200] + "..." if pdf_text and len(pdf_text) > 200 else pdf_text
+            },
+            "image_conversion": {
+                "success": bool(pdf_images),
+                "pages_converted": len(pdf_images)
+            },
+            "type_detection_from_text": detected_type_text,
+            "status": "success"
+        }
+
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e), "status": "error"}
+        )
+
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8015)
+    uvicorn

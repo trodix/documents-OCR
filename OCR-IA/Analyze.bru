@@ -11,14 +11,10 @@ post {
 }
 
 body:multipart-form {
-  file: @file(/media/DATA/workspace/DEV/CPAGE/ia-ocr/src/test/resources/ocr/carte-identite-france-format-bancaire.jpg)
+  file: @file(/home/sebastien/Documents/Présentation-grilles-des-salaires.pdf)
   fields: '''
     [
-      "nom",
-      "prenom",
-      "dateNaissance", 
-      "dateExpiration",
-      "numero"
+      "salaires"
     ]
   ''' @contentType(application/json)
 }

@@ -5,13 +5,22 @@ meta {
 }
 
 post {
-  url: {{url}}/api/documents/analyze
+  url: {{url}}/api/documents/analyze-with-fields
   body: multipartForm
   auth: inherit
 }
 
 body:multipart-form {
-  file: @file(/media/DATA/workspace/DEV/CPAGE/ia-ocr/src/test/resources/ocr/facture.png)
+  file: @file(/media/DATA/workspace/DEV/CPAGE/ia-ocr/src/test/resources/ocr/carte-identite-france-format-bancaire.jpg)
+  fields: '''
+    [
+      "nom",
+      "prenom",
+      "dateNaissance", 
+      "dateExpiration",
+      "numero"
+    ]
+  ''' @contentType(application/json)
 }
 
 settings {

@@ -200,45 +200,18 @@ public class DocumentServiceJavaImpl implements DocumentService {
             detectedType = detectDocumentTypeFromImage(firstPage);
         }
 
-//        // Création du prompt pour l'analyse
-//        String extractionPrompt = PromptBuilder.createDocumentAnalysisPromptForText(
-//                detectedType,
-//                fieldsToExtract,
-//                "" // Optionnel: on peut mettre du texte OCR si disponible
-//        );
-
         String extractionPrompt = createDocumentAnalysisPromptForText(
                 detectedType,
                 fieldsToExtract,
                 ""
         );
 
-//
-//        // Préparer le message pour le modèle
-//        ChatMessage extractionMessage = ChatMessage.builder()
-//                .role("user")
-//                .content(List.of(
-//                        Map.of("type", "text", "text", extractionPrompt),
-//                        Map.of("type", "image_url", "image_url", Map.of("url", "data:image/png;base64," + firstPageB64))
-//                ))
-//                .build();
-
         UserMessage extractionMessage = UserMessage.builder()
                 .text(extractionPrompt)
                 .media(new Media(MimeTypeUtils.IMAGE_PNG, firstPage))
                 .build();
 
-//
         try {
-//            ChatResponse extractionResponse = client.chatComplete(
-//                    "pixtral-12b-2409",
-//                    List.of(extractionMessage),
-//                    1000,
-//                    0.1
-//            );
-//
-//            String rawResponse = extractionResponse.getChoices().get(0).getMessage().getContent();
-
 
             ChatResponse response = mistralAiChatModel.call(
                     new Prompt(
@@ -309,76 +282,6 @@ public class DocumentServiceJavaImpl implements DocumentService {
     private String detectDocumentTypeFromImage(Resource imageBase64) {
         return detectDocumentTypeFromImage(imageBase64, "image/png");
     }
-
-//    private String detectDocumentTypeFromImage(Resource imageBase64, String contentType) {
-//        try {
-//            // Message envoyé au modèle
-//            ChatMessage detectionMessage = ChatMessage.builder()
-//                    .role("user")
-//                    .content(List.of(
-//                            Map.of(
-//                                    "type", "text",
-//                                    "text", """
-//                                        Analyse cette image et détermine de quel type de document il s'agit.
-//
-//                                        Types possibles: facture, bon_commande, bon_livraison, carte_identite_francaise,
-//                                        marche, passeport, permis_conduire, ou autre.
-//
-//                                        Réponds UNIQUEMENT avec le type de document en un seul mot,
-//                                        ou "autre" si tu ne peux pas déterminer.
-//
-//                                        Exemples de réponses valides: facture, bon_commande,
-//                                        carte_identite_francaise, autre
-//                                        """
-//                            ),
-//                            Map.of(
-//                                    "type", "image_url",
-//                                    "image_url", Map.of(
-//                                            "url", "data:" + contentType + ";base64," + imageBase64
-//                                    )
-//                            )
-//                    ))
-//                    .build();
-//
-//            // Appel au modèle
-//            ChatResponse detectionResponse = client.chatComplete(
-//                    "pixtral-12b-2409",
-//                    List.of(detectionMessage),
-//                    50,
-//                    0.1
-//            );
-//
-//            String detectedRaw = detectionResponse.getChoices()
-//                    .get(0)
-//                    .getMessage()
-//                    .getContent()
-//                    .strip()
-//                    .toLowerCase(Locale.ROOT);
-//
-//            log.info("Type détecté par l'IA: {}", detectedRaw);
-//
-//            // Validation stricte
-//            if (getDocumentTypesKeywords().containsKey(detectedRaw)) {
-//                return detectedRaw;
-//            }
-//
-//            // Vérifier si ce n’est pas "autre"
-//            if (!"autre".equals(detectedRaw)) {
-//                // Mapping approximatif (ex: "factures" → "facture")
-//                for (String knownType : getDocumentTypesKeywords().keySet()) {
-//                    if (knownType.contains(detectedRaw) || detectedRaw.contains(knownType)) {
-//                        return knownType;
-//                    }
-//                }
-//            }
-//
-//            return null;
-//
-//        } catch (Exception e) {
-//            log.error("Erreur détection type depuis image: {}", e.getMessage(), e);
-//            return null;
-//        }
-//    }
 
     private String detectDocumentTypeFromImage(Resource imageResource, String contentType) {
         try {

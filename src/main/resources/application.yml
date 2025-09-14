@@ -4,3 +4,11 @@ server:
 spring:
   application:
     name: ia-ocr
+  ai:
+    mistralai:
+      api-key: ${MISTRAL_API_KEY}
+      chat:
+        options:
+          model: mistral-large-latest  # Modèle par défaut pour le texte
+          temperature: 0.1
+          max-tokens: 1000

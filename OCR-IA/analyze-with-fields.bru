@@ -1,0 +1,20 @@
+meta {
+  name: analyze-with-fields
+  type: http
+  seq: 2
+}
+
+post {
+  url: {{url}}/api/documents/analyze-with-fields
+  body: multipartForm
+  auth: inherit
+}
+
+body:multipart-form {
+  fields: [ "NomPoste"] @contentType(application/json)
+  file: @file(/home/sebastien/Documents/fiche-de-poste.pdf)
+}
+
+settings {
+  encodeUrl: true
+}

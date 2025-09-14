@@ -3,6 +3,7 @@ package fr.cpage.ged.ia.iaocr.controller;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import fr.cpage.ged.ia.iaocr.service.DocumentService;
 import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -17,6 +18,7 @@ import java.util.List;
 @RequiredArgsConstructor
 public class DocumentController {
 
+    @Qualifier("documentServiceJavaImpl")
     private final DocumentService documentService;
 
     /**
